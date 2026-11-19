@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>赤壁の戦い 3D シミュレーター</title>
+<style>
+    body {margin:0; overflow:hidden; background:#000;}
+    #ui {
+        position:absolute; top:10px; left:10px; color:#fff;
+        font-family:Arial,Helvetica,sans-serif; line-height:1.5;
+        background:rgba(0,0,0,0.4); padding:8px 12px; border-radius:4px;
+        pointer-events:none;
+    }
+    #ui button {
+        pointer-events:auto; margin-top:6px; font-size:0.9em;
+    }
+</style>
+</head>
+<body>
+<div id="ui">
+    <div id="phase">フェーズ：--</div>
+    <div id="wind">風向き：--</div>
+    <div id="cnt">曹操艦数：0 / 連合艦数：0</div>
+    <button id="hideBtn">UIを隠す</button>
+</div>
+
+<script type="module">
+/* --------------------------------------------------------------
+   1. 基本セットアップ
+-------------------------------------------------------------- */
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.165/build/three.module.js";
+import {OrbitControls} from "https://cdn.jsdelivr.net/npm/three@0.165/examples/jsm/controls/OrbitControls.js";
+import {Water} from "https://cdn.jsdelivr.net/npm/three@0.165/examples/jsm/objects/Water2.js";
+import {GLTFLoader} from "https://cdn.jsdelivr.net/npm/three@0.165/examples/jsm/loaders/GLTFLoader.js";
+
+/* renderer */
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth,window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+/* scene */
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x050505, 0.0015);
+
+/* camera */
+const cam = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 1, 5000);
+cam.position.set(0, 150, 400);
+
+/* controls – 手動モード用 */
+const controls = new OrbitControls(cam, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+
+/* --------------------------------------------------------------
+   2. 環境：水面・岸辺・灯籠・月光
+-------------------------------------------------------------- */
+// 2‑1 水面
+const waterGeometry = new THREE.PlaneGeometry(2000,2000);
+const water = new Water(
+    waterGeometry,
+    {
+        textureWidth: 512,
+        textureHeight: 512,
+        waterNormals: new THREE.TextureLoader()
+            .load('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r165/examples/textures/waternormals.jpg', tex => tex.wrapS = tex.wrapT = THREE.RepeatWrapping),
+        sunDirection: new THREE.Vector3(),
+        sunColor: 0xffffff,
+        waterColor: 0x001e0f,
+        distortionScale: 3.7,
+        fog: scene.fog !== undefined
+    }
+);
+water.rotation.x = -Math.PI/2;
+scene.add(water);
+
+// 2‑2 岸辺（単純な板）+ 断崖
+function makeCliff(x,z) {
+    const geo = new THREE.BoxGeometry(200,200,20);
+    const mat = new THREE.MeshStandardMaterial({color:0x332211});
+    const cliff = new THREE.Mesh(geo,mat);
+    cliff.position.set(x,100,z);
+    cliff.receiveShadow = true;
+    cliff.castShadow = true;
+    scene.add(cliff);
+}
+makeCliff(-600,0); // 南岸（連合軍側）
+makeCliff(600,0);  // 北岸（曹操軍側)
+
+// 2‑3 月光（ディレクショナルライトの代わりに薄いスポット） 
+const moon = new THREE.PointLight(0x8899ff, 0.7, 0, 2);
+moon.position.set(0,400,0);
+moon.castShadow = true;
+scene.add(moon);
+
+// 2‑4 提灯（船上のオレンジ光） – 球体を点光源で代用
+function addLantern(pos) {
+    const lamp = new THREE.PointLight(0xffaa55, 0.5, 80, 2);
+    lamp.position.copy(pos);
+    scene.add(lamp);
+}
+
+/* --------------------------------------------------------------
+   3. 艦隊データ・InstancedMesh 作成
+-------------------------------------------------------------- */
+const fleet = {
+    // 兵種定義：ジオメトリ、マテリアル、インスタンス数
+    "big": {geom:new THREE.CylinderGeometry(8,12,30,6), mat:new THREE.MeshStandardMaterial({color:0x555555}), count:150},
+    "mid": {geom:new THREE.BoxGeometry(6,4,20), mat:new THREE.MeshStandardMaterial({color:0x777777}), count:60},
+    "fireShip": {geom:new THREE.CylinderGeometry(4,6,12,6), mat:new THREE.MeshStandardMaterial({color:0xcc3300}), count:10}
+};
+
+const fleetsInst = {}; // {type:InstancedMesh}
+Object.entries(fleet).forEach(([type,def])=>{
+    const mesh = new THREE.InstancedMesh(def.geom, def.mat, def.count);
+    mesh.castShadow = mesh.receiveShadow = true;
+    scene.add(mesh);
+    fleetsInst[type] = mesh;
+});
+
+/* 初期配置（座標は簡易的に） */
+let idx = {big:0, mid:0, fireShip:0};
+function placeShip(type, side, offsetX, offsetZ) {
+    const mesh = fleetsInst[type];
+    const i = idx[type]++;
+    const dummy = new THREE.Object3D();
+    dummy.position.set(offsetX, 15, offsetZ);
+    dummy.rotation.y = side === "cao" ? Math.PI : 0; // 曹操側は逆向き
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+}
+function initFleets(){
+    // 大型戦船（曹操側）150 隊
+    for(let i=0;i<150;i++){
+        const x = -400 + (i%15)*30;
+        const z = -300 + Math.floor(i/15)*30;
+        placeShip("big","cao",x,z);
+    }
+    // 中型船（連合側）60 隊
+    for(let i=0;i<60;i++){
+        const x = 200 + (i%10)*25;
+        const z = -250 + Math.floor(i/10)*25;
+        placeShip("mid","all",x,z);
+    }
+}
+initFleets();
+
+/* --------------------------------------------------------------
+   4. パーティクル（矢・炎・風）と簡易 UI
+-------------------------------------------------------------- */
+const particleGroup = new THREE.Group();
+scene.add(particleGroup);
+
+/* 4‑1 矢パーティクル（フェーズ1） */
+const arrowTex = new THREE.TextureLoader().load('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r165/examples/textures/sprites/disc.png');
+function shootArrow(from, to){
+    const geo = new THREE.BufferGeometry();
+    const positions = new Float32Array([0,0,0]);
+    const vel = new THREE.Vector3().subVectors(to,from).normalize().multiplyScalar(1.5);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({map:arrowTex, color:0xffffaa, transparent:true}));
+    sprite.position.copy(from);
+    sprite.userData = {vel, life:200};
+    particleGroup.add(sprite);
+}
+
+/* 4‑2 炎パーティクル（フェーズ4） */
+const fireTex = new THREE.TextureLoader().load('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r165/examples/textures/sprites/spark1.png');
+function spawnFire(pos){
+    const fire = new THREE.Sprite(new THREE.SpriteMaterial({map:fireTex, color:0xff6600, transparent:true, opacity:0.9}));
+    fire.position.copy(pos);
+    fire.scale.set(20,20,1);
+    fire.userData = {life:120, scaleInc:0.03};
+    particleGroup.add(fire);
+}
+
+/* 4‑3 風・火粉（小さな点のパーティクル） */
+const windTex = new THREE.TextureLoader().load('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r165/examples/textures/sprites/disc.png');
+function createWindParticle(dir){
+    const p = new THREE.Sprite(new THREE.SpriteMaterial({map:windTex, color:0xffffff, transparent:true, opacity:0.6}));
+    p.position.set(-1000,50,THREE.MathUtils.randFloatSpread(800));
+    p.userData = {dir, speed:0.8};
+    particleGroup.add(p);
+}
+
+/* --------------------------------------------------------------
+   5. フェーズ制御
+-------------------------------------------------------------- */
+let currentPhase = "";
+let windDir = new THREE.Vector2(-1,0); // 初期は北西風（-X,-Z）←左上方向
+const phaseDur = { // ミリ秒単位の概算
+    "phase1": 20000,
+    "phase2": 15000,
+    "phase3": 12000,
+    "phase4": 25000
+};
+let phaseStart = performance.now();
+
+// UI 要素取得
+const uiPhase = document.getElementById("phase");
+const uiWind = document.getElementById("wind");
+const uiCnt = document.getElementById("cnt");
+const hideBtn = document.getElementById("hideBtn");
+
+// UI 隠す/表示ボタン
+let uiHidden = false;
+hideBtn.addEventListener("click",()=>{ uiHidden = !uiHidden; document.getElementById("ui").style.display = uiHidden?"none":"block"; hideBtn.textContent = uiHidden?"UIを表示":"UIを隠す"; });
+
+function setPhase(name){
+    currentPhase = name;
+    uiPhase.textContent = "フェーズ：" + name;
+}
+function setWind(v2){
+    windDir.copy(v2).normalize();
+    const deg = Math.round(THREE.MathUtils.radToDeg(Math.atan2(v2.y, v2.x)));
+    uiWind.textContent = "風向き：" + deg + "°";
+}
+function updateCounts(){
+    // 簡易にインスタンス残数を数える（本来は別管理が必要）
+    const cao = fleet.big.count - getDestroyed("big","cao");
+    const all = fleet.mid.count - getDestroyed("mid","all");
+    uiCnt.textContent = `曹操艦数：${cao} / 連合艦数：${all}`;
+}
+function getDestroyed(type,side){ // ここではデモとして常に0
+    return 0;
+}
+
+/* --------------------------------------------------------------
+   6. カメラモード
+-------------------------------------------------------------- */
+let autoCam = false;
+let camTheta = 0;
+document.addEventListener("keydown",(e)=>{ if(e.key==="c") autoCam=!autoCam; });
+
+function updateCamera(delta){
+    if(autoCam){
+        camTheta += delta*0.02;
+        const radius = 500;
+        cam.position.set(Math.cos(camTheta)*radius, 200, Math.sin(camTheta)*radius);
+        cam.lookAt(0,0,0);
+    }else{
+        controls.update();
+    }
+}
+
+/* --------------------------------------------------------------
+   7. アニメーションループ
+-------------------------------------------------------------- */
+const clock = new THREE.Clock();
+
+function animate(){
+    const delta = clock.getDelta();
+    const now = performance.now();
+
+    // フェーズ遷移
+    const elapsed = now - phaseStart;
+    if(currentPhase==="") setPhase("フェーズ1：弓矢戦");
+    if(currentPhase==="フェーズ1：弓矢戦" && elapsed>phaseDur.phase1){
+        setPhase("フェーズ2：東南の風！");
+        setWind(new THREE.Vector2(1,1)); // 東南風
+        // 風パーティクル開始
+        for(let i=0;i<30;i++) createWindParticle(windDir);
+        phaseStart = now;
+    }else if(currentPhase==="フェーズ2：東南の風！" && elapsed>phaseDur.phase2){
+        setPhase("フェーズ3：黄蓋の火計");
+        // 火船配置（簡易に位置を上書き）
+        for(let i=0;i<10;i++){
+            const x = -300 + i*20;
+            const z = -200;
+            placeShip("fireShip","all",x,z);
+        }
+        phaseStart = now;
+    }else if(currentPhase==="フェーズ3：黄蓋の火計" && elapsed>phaseDur.phase3){
+        setPhase("フェーズ4：連環炎上");
+        // 火船が衝突 → 炎発生
+        for(let i=0;i<10;i++){
+            spawnFire(new THREE.Vector3(-300 + i*20, 5, -200));
+        }
+        phaseStart = now;
+    }
+
+    // 矢発射（フェーズ1 のみ）
+    if(currentPhase==="フェーズ1：弓矢戦"){
+        if(Math.random()<0.02){
+            // 曹操側から連合側へ 10 本の矢をランダムに放つ
+            const from = new THREE.Vector3(-400 + Math.random()*200, 15, -200 + Math.random()*200);
+            const to   = new THREE.Vector3(200 + Math.random()*200, 15, -200 + Math.random()*200);
+            shootArrow(from,to);
+        }
+    }
+
+    // パーティクルアップデート
+    particleGroup.children.forEach(p=>{
+        if(p.type==="Sprite"){
+            // 矢・火船・炎・風の共通ロジック
+            if(p.userData.vel){
+                p.position.addScaledVector(p.userData.vel, delta*60);
+                p.userData.life -= delta*60;
+                if(p.userData.life<=0) particleGroup.remove(p);
+            }else if(p.userData.speed){
+                // 風粉は x に流れる
+                p.position.x += p.userData.speed*delta*60;
+                if(p.position.x>1200) p.position.x = -1200;
+            }else if(p.userData.scaleInc){
+                p.scale.addScalar(p.userData.scaleInc);
+                p.userData.life -= delta*60;
+                p.material.opacity = Math.max(0, p.userData.life/120);
+                if(p.userData.life<=0) particleGroup.remove(p);
+            }
+        }
+    });
+
+    // 水面更新
+    water.material.uniforms['time'].value += delta;
+
+    // カメラ
+    updateCamera(delta);
+
+    // UI
+    updateCounts();
+
+    renderer.render(scene,cam);
+    requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+
+/* --------------------------------------------------------------
+   8. リサイズ対応
+-------------------------------------------------------------- */
+window.addEventListener("resize",()=>{
+    cam.aspect = window.innerWidth / window.innerHeight;
+    cam.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

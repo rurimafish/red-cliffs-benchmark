@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>赤壁の戦い - 3Dシミュレーター</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Yu Mincho', 'Sawarabi Mincho', serif;
+            color: #fff;
+            user-select: none;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+            transition: opacity 0.5s;
+            text-shadow: 0 0 5px #000, 0 0 10px #000;
+        }
+        .hidden { opacity: 0; }
+        
+        #header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+        #phase-title {
+            font-size: 28px;
+            font-weight: bold;
+            color: #ffaa00;
+            border-bottom: 2px solid #ffaa00;
+            padding-bottom: 5px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px 20px;
+            border-radius: 5px;
+        }
+        #stats {
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #555;
+            font-size: 16px;
+        }
+        .stat-row { margin-bottom: 8px; }
+        .cao { color: #ff5555; font-weight: bold; }
+        .sunliu { color: #55aaff; font-weight: bold; }
+        
+        #controls {
+            pointer-events: auto;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            background: rgba(50, 50, 50, 0.8);
+            color: white;
+            border: 1px solid #888;
+            padding: 10px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: 0.2s;
+        }
+        button:hover { background: rgba(100, 100, 100, 0.9); }
+        button.active { background: #ffaa00; color: #000; font-weight: bold; border-color: #ffaa00; }
+        
+        #wind-indicator {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            width: 80px;
+            height: 80px;
+            background: rgba(0,0,0,0.6);
+            border-radius: 50%;
+            border: 2px solid #888;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+        }
+        #wind-arrow {
+            font-size: 30px;
+            transition: transform 2s ease-in-out;
+            color: #00ffaa;
+        }
+        #wind-text { font-size: 12px; margin-top: 5px; }
+
+        #overlay-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 40px;
+            color: white;
+            text-align: center;
+            opacity: 0;
+            transition: opacity 1s;
+            pointer-events: none;
+            letter-spacing: 5px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<div id="ui-layer">
+    <div id="header">
+        <div id="phase-title">序盤：長江の夜戦</div>
+        <div id="stats">
+            <div class="stat-row">曹操軍 (北) 残存: <span id="cao-count" class="cao">150</span>隻</div>
+            <div class="stat-row">孫劉連合軍 (南) 残存: <span id="sun-count" class="sunliu">60</span>隻</div>
+        </div>
+    </div>
+    
+    <div id="controls">
+        <button id="cam-auto" class="active">シネマティックカメラ</button>
+        <button id="cam-manual">手動カメラ (ドラッグで操作)</button>
+        <button id="toggle-ui">UI表示/非表示</button>
+    </div>
+
+    <div id="wind-indicator">
+        <div id="wind-arrow">↑</div>
+        <div id="wind-text">北西の風</div>
+    </div>
+</div>
+
+<div id="overlay-text"></div>
+
+<!-- Three.js & OrbitControls -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+// ==========================================
+// 1. 初期設定・シーン構築
+// ==========================================
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x020510);
+scene.fog = new THREE.FogExp2(0x020510, 0.002);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 2000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+container.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI / 2 - 0.05; // 水面下にいかないように
+
+// グローバル変数
+let time = 0;
+let phase = 1; // 1:弓矢, 2:東南の風, 3:火船, 4:連環炎上
+let isCinematic = true;
+let windVector = new THREE.Vector3(1, 0, 1).normalize(); // 初期:北西(画面奥・左から手前・右へ)
+
+// UI要素
+const domPhase = document.getElementById('phase-title');
+const domCao = document.getElementById('cao-count');
+const domSun = document.getElementById('sun-count');
+const domWindArrow = document.getElementById('wind-arrow');
+const domWindText = document.getElementById('wind-text');
+const domOverlay = document.getElementById('overlay-text');
+
+// ==========================================
+// 2. 環境（照明、水面、地形）
+// ==========================================
+// 照明
+const ambientLight = new THREE.AmbientLight(0x101525, 1.5); // 月明かりの青
+scene.add(ambientLight);
+
+const moonLight = new THREE.DirectionalLight(0x88aaff, 0.8);
+moonLight.position.set(-200, 300, -200);
+moonLight.castShadow = true;
+moonLight.shadow.camera.left = -400;
+moonLight.shadow.camera.right = 400;
+moonLight.shadow.camera.top = 400;
+moonLight.shadow.camera.bottom = -400;
+scene.add(moonLight);
+
+// 水面
+const riverGeo = new THREE.PlaneGeometry(1500, 1500, 100, 100);
+riverGeo.rotateX(-Math.PI / 2);
+const riverMat = new THREE.MeshStandardMaterial({
+    color: 0x051a2e,
+    roughness: 0.1,
+    metalness: 0.8,
+    transparent: true,
+    opacity: 0.9
+});
+const river = new THREE.Mesh(riverGeo, riverMat);
+river.receiveShadow = true;
+scene.add(river);
+
+// 地形（赤壁の断崖・南岸）
+const cliffGeo = new THREE.BoxGeometry(1500, 100, 300);
+const cliffMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
+const northBank = new THREE.Mesh(cliffGeo, cliffMat);
+northBank.position.set(0, 20, -650);
+scene.add(northBank);
+
+const southBank = new THREE.Mesh(cliffGeo, cliffMat);
+southBank.position.set(0, 20, 650);
+scene.add(southBank);
+
+// 七星壇（祈祷所）光の柱エフェクト用
+const altarGlowGeo = new THREE.CylinderGeometry(5, 5, 500, 16);
+const altarGlowMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0, blending: THREE.AdditiveBlending });
+const altarGlow = new THREE.Mesh(altarGlowGeo, altarGlowMat);
+altarGlow.position.set(100, 250, 450);
+scene.add(altarGlow);
+
+// ==========================================
+// 3. 艦隊構築（InstancedMeshで軽量化）
+// ==========================================
+const CAO_COUNT = 150;
+const SUN_COUNT = 60;
+const FIRE_SHIP_COUNT = 10;
+
+// 船のパーツ（単純化したポリゴン）
+const hullGeo = new THREE.BoxGeometry(4, 2, 12);
+const cabinGeo = new THREE.BoxGeometry(3, 4, 6);
+const sailGeo = new THREE.BoxGeometry(0.2, 8, 5);
+
+// マテリアル
+const caoMat = new THREE.MeshStandardMaterial({ color: 0x3d1c1c }); // 曹操軍:暗い赤
+const sunMat = new THREE.MeshStandardMaterial({ color: 0x1c2b3d }); // 連合軍:青
+const fireShipMat = new THREE.MeshStandardMaterial({ color: 0x882200 }); // 火船
+
+const caoHulls = new THREE.InstancedMesh(hullGeo, caoMat, CAO_COUNT);
+const caoCabins = new THREE.InstancedMesh(cabinGeo, caoMat, CAO_COUNT);
+scene.add(caoHulls, caoCabins);
+
+const sunHulls = new THREE.InstancedMesh(hullGeo, sunMat, SUN_COUNT);
+const sunCabins = new THREE.InstancedMesh(cabinGeo, sunMat, SUN_COUNT);
+scene.add(sunHulls, sunCabins);
+
+const fireHulls = new THREE.InstancedMesh(hullGeo, fireShipMat, FIRE_SHIP_COUNT);
+scene.add(fireHulls);
+
+// 状態管理配列
+const caoShips = [];
+const sunShips = [];
+const fireShips = [];
+
+const dummy = new THREE.Object3D();
+const colorHelper = new THREE.Color();
+
+// 曹操軍（北）艦隊配置 - 連環の計（密集・連結陣形）
+let caoIdx = 0;
+for(let x = 0; x < 15; x++) {
+    for(let z = 0; z < 10; z++) {
+        const px = (x - 7) * 12 + (Math.random() * 2 - 1);
+        const pz = -350 + z * 15 + (Math.random() * 2 - 1);
+        caoShips.push({ id: caoIdx, x: px, y: 0, z: pz, rot: 0, burning: false, destroyed: false, fireTimer: 0 });
+        
+        dummy.position.set(px, 0, pz);
+        dummy.updateMatrix();
+        caoHulls.setMatrixAt(caoIdx, dummy.matrix);
+        dummy.position.y = 3;
+        dummy.updateMatrix();
+        caoCabins.setMatrixAt(caoIdx, dummy.matrix);
+        caoHulls.setColorAt(caoIdx, colorHelper.setHex(0x3d1c1c));
+        caoIdx++;
+    }
+}
+
+// 連環の計：鎖（ライン）の描画
+const chainGeo = new THREE.BufferGeometry();
+const chainPos = [];
+caoShips.forEach((ship, i) => {
+    if(i % 10 !== 9) { // 縦列連結
+        chainPos.push(ship.x, 1, ship.z);
+        chainPos.push(caoShips[i+1].x, 1, caoShips[i+1].z);
+    }
+});
+chainGeo.setAttribute('position', new THREE.Float32BufferAttribute(chainPos, 3));
+const chainMat = new THREE.LineBasicMaterial({ color: 0x555555 });
+const chains = new THREE.LineSegments(chainGeo, chainMat);
+scene.add(chains);
+
+// 連合軍（南）艦隊配置 - 散開陣形
+let sunIdx = 0;
+for(let x = 0; x < 12; x++) {
+    for(let z = 0; z < 5; z++) {
+        const px = (x - 5.5) * 25 + (Math.random() * 10 - 5);
+        const pz = 300 - z * 20 + Math.abs(x - 5.5) * 5; // 弧を描く陣形
+        sunShips.push({ id: sunIdx, x: px, y: 0, z: pz, rot: Math.PI, action: 'idle' });
+        
+        dummy.position.set(px, 0, pz);
+        dummy.rotation.y = Math.PI;
+        dummy.updateMatrix();
+        sunHulls.setMatrixAt(sunIdx, dummy.matrix);
+        dummy.position.y = 3;
+        dummy.updateMatrix();
+        sunCabins.setMatrixAt(sunIdx, dummy.matrix);
+        sunIdx++;
+    }
+}
+
+// 黄蓋の火船（最初は南に待機）
+for(let i = 0; i < FIRE_SHIP_COUNT; i++) {
+    const px = (i - FIRE_SHIP_COUNT/2) * 15;
+    const pz = 200 + Math.random() * 10;
+    fireShips.push({ id: i, x: px, y: 0, z: pz, rot: Math.PI, active: false });
+    
+    dummy.position.set(px, 0, pz);
+    dummy.rotation.y = Math.PI;
+    dummy.updateMatrix();
+    fireHulls.setMatrixAt(i, dummy.matrix);
+}
+
+caoHulls.instanceMatrix.needsUpdate = true; caoCabins.instanceMatrix.needsUpdate = true; caoHulls.instanceColor.needsUpdate = true;
+sunHulls.instanceMatrix.needsUpdate = true; sunCabins.instanceMatrix.needsUpdate = true;
+fireHulls.instanceMatrix.needsUpdate = true;
+
+// ==========================================
+// 4. パーティクルシステム
+// ==========================================
+// 風・火の粉
+const emberGeo = new THREE.BufferGeometry();
+const emberCount = 3000;
+const emberPos = new Float32Array(emberCount * 3);
+for(let i=0; i<emberCount*3; i++) emberPos[i] = (Math.random() - 0.5) * 1000;
+emberGeo.setAttribute('position', new THREE.BufferAttribute(emberPos, 3));
+const emberMat = new THREE.PointsMaterial({ color: 0xffaa00, size: 1.5, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending });
+const embers = new THREE.Points(emberGeo, emberMat);
+scene.add(embers);
+
+// 火矢
+const arrowCount = 200;
+const arrows = [];
+const arrowGeo = new THREE.BufferGeometry();
+const arrowPos = new Float32Array(arrowCount * 3);
+arrowGeo.setAttribute('position', new THREE.BufferAttribute(arrowPos, 3));
+const arrowMat = new THREE.PointsMaterial({ color: 0xffdd55, size: 3, blending: THREE.AdditiveBlending });
+const arrowPts = new THREE.Points(arrowGeo, arrowMat);
+scene.add(arrowPts);
+
+for(let i=0; i<arrowCount; i++) {
+    arrows.push({ active: false, t: 0, sx:0, sy:0, sz:0, tx:0, ty:0, tz:0 });
+}
+
+// 爆発・炎（大規模）
+const fireGeo = new THREE.BufferGeometry();
+const fireCount = 4000;
+const firePos = new Float32Array(fireCount * 3);
+const fireLife = new Float32Array(fireCount);
+fireGeo.setAttribute('position', new THREE.BufferAttribute(firePos, 3));
+fireGeo.setAttribute('life', new THREE.BufferAttribute(fireLife, 1));
+const fireMat = new THREE.PointsMaterial({ color: 0xff3300, size: 4, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending });
+const fires = new THREE.Points(fireGeo, fireMat);
+scene.add(fires);
+const fireData = [];
+for(let i=0; i<fireCount; i++) fireData.push({ active: false, x:0, y:0, z:0, vx:0, vy:0, vz:0, life:0 });
+
+function spawnFire(x, y, z, intensity=1) {
+    for(let i=0; i<30 * intensity; i++) {
+        const idx = fireData.findIndex(f => !f.active);
+        if(idx !== -1) {
+            fireData[idx] = {
+                active: true, x: x, y: y, z: z,
+                vx: (Math.random()-0.5)*5, vy: Math.random()*5+2, vz: (Math.random()-0.5)*5,
+                life: 1.0
+            };
+        }
+    }
+}
+
+// ==========================================
+// 5. ゲームロジックとアニメーションループ
+// ==========================================
+const clock = new THREE.Clock();
+
+function showOverlay(text) {
+    domOverlay.innerText = text;
+    domOverlay.style.opacity = 1;
+    setTimeout(() => domOverlay.style.opacity = 0, 3000);
+}
+
+function updateArrows() {
+    if(phase === 1) { // 弓矢戦
+        if(Math.random() < 0.2) {
+            const arr = arrows.find(a => !a.active);
+            if(arr) {
+                const isCao = Math.random() < 0.5;
+                const src = isCao ? caoShips[Math.floor(Math.random()*caoShips.length)] : sunShips[Math.floor(Math.random()*sunShips.length)];
+                arr.active = true; arr.t = 0;
+                arr.sx = src.x; arr.sy = 5; arr.sz = src.z;
+                arr.tx = src.x + (Math.random()-0.5)*200; arr.ty = 0; arr.tz = src.z + (isCao ? 1 : -1) * (200 + Math.random()*100);
+            }
+        }
+    }
+    
+    const pos = arrowPts.geometry.attributes.position.array;
+    arrows.forEach((a, i) => {
+        if(a.active) {
+            a.t += 0.02;
+            if(a.t >= 1) {
+                a.active = false; pos[i*3]=0; pos[i*3+1]=-100; pos[i*3+2]=0;
+            } else {
+                const p = a.t;
+                pos[i*3] = a.sx + (a.tx - a.sx) * p;
+                pos[i*3+1] = a.sy + (a.ty - a.sy) * p + Math.sin(p * Math.PI) * 50; // 放物線
+                pos[i*3+2] = a.sz + (a.tz - a.sz) * p;
+            }
+        } else {
+            pos[i*3+1] = -100;
+        }
+    });
+    arrowPts.geometry.attributes.position.needsUpdate = true;
+}
+
+function updateTimeline(deltaTime) {
+    time += deltaTime;
+
+    // フェーズ進行管理
+    if(time > 10 && phase === 1) {
+        phase = 2;
+        domPhase.innerText = "諸葛亮、東南の風を祈る";
+        showOverlay("東南の風、吹く");
+    } else if(time > 20 && phase === 2) {
+        phase = 3;
+        domPhase.innerText = "黄蓋、火船突撃！";
+        showOverlay("苦肉の計、成る");
+        fireShips.forEach(fs => fs.active = true);
+    } else if(time > 32 && phase === 3) {
+        phase = 4;
+        domPhase.innerText = "連環炎上・総攻撃";
+        showOverlay("連環の計、炎上");
+        sunShips.forEach(ss => ss.action = 'charge');
+    }
+
+    // フェーズごとの処理
+    if(phase === 2) {
+        // 風向き変化 (北西 -> 東南)
+        windVector.lerp(new THREE.Vector3(-1, 0, -1).normalize(), 0.02);
+        domWindArrow.style.transform = `rotate(${Math.atan2(windVector.x, -windVector.z)}rad)`;
+        domWindText.innerText = "東南の風";
+        
+        // 祭壇の光
+        if(altarGlow.material.opacity < 0.8) altarGlow.material.opacity += 0.01;
+    } else if(phase >= 3) {
+        altarGlow.material.opacity *= 0.95;
+    }
+
+    if(phase === 3 || phase === 4) {
+        // 火船の突撃
+        fireShips.forEach(fs => {
+            if(fs.active && fs.z > -250) {
+                fs.z -= 60 * deltaTime;
+                spawnFire(fs.x, 2, fs.z, 0.5);
+                dummy.position.set(fs.x, 0, fs.z);
+                dummy.rotation.y = fs.rot;
+                dummy.updateMatrix();
+                fireHulls.setMatrixAt(fs.id, dummy.matrix);
+                fireHulls.instanceMatrix.needsUpdate = true;
+            } else if (fs.active && fs.z <= -250) {
+                // 衝突・爆発
+                fs.active = false;
+                spawnFire(fs.x, 5, fs.z, 10);
+                
+                // 曹操軍への着火
+                caoShips.forEach(cs => {
+                    if(Math.abs(cs.x - fs.x) < 40 && Math.abs(cs.z - fs.z) < 40) {
+                        cs.burning = true;
+                    }
+                });
+            }
+        });
+    }
+
+    if(phase === 4) {
+        // 連鎖炎上ロジック
+        let aliveCao = 0;
+        caoShips.forEach((cs, i) => {
+            if(!cs.destroyed) aliveCao++;
+            if(cs.burning && !cs.destroyed) {
+                cs.fireTimer += deltaTime;
+                spawnFire(cs.x, 5, cs.z, 1);
+                
+                if(cs.fireTimer > 1) {
+                    caoHulls.setColorAt(i, colorHelper.setHex(0x111111)); // 黒こげ
+                    caoHulls.instanceColor.needsUpdate = true;
+                }
+                if(cs.fireTimer > 5) {
+                    cs.destroyed = true;
+                    cs.y = -5; // 沈没
+                }
+                
+                // 延焼（鎖で繋がれているため早い）
+                if(Math.random() < 0.1) {
+                    caoShips.forEach(other => {
+                        if(!other.burning && Math.abs(other.x - cs.x) < 15 && Math.abs(other.z - cs.z) < 20) {
+                            other.burning = true;
+                        }
+                    });
+                }
+            }
+            dummy.position.set(cs.x, cs.y, cs.z);
+            dummy.updateMatrix();
+            caoHulls.setMatrixAt(i, dummy.matrix);
+            dummy.position.y = cs.y + 3;
+            dummy.updateMatrix();
+            caoCabins.setMatrixAt(i, dummy.matrix);
+        });
+        caoHulls.instanceMatrix.needsUpdate = true;
+        caoCabins.instanceMatrix.needsUpdate = true;
+        domCao.innerText = aliveCao;
+
+        // 連合軍の突撃
+        sunShips.forEach((ss, i) => {
+            if(ss.action === 'charge' && ss.z > -100) {
+                ss.z -= 30 * deltaTime;
+                dummy.position.set(ss.x, ss.y, ss.z);
+                dummy.rotation.y = ss.rot;
+                dummy.updateMatrix();
+                sunHulls.setMatrixAt(i, dummy.matrix);
+                dummy.position.y = ss.y + 3;
+                dummy.updateMatrix();
+                sunCabins.setMatrixAt(i, dummy.matrix);
+            }
+        });
+        sunHulls.instanceMatrix.needsUpdate = true;
+        sunCabins.instanceMatrix.needsUpdate = true;
+    }
+}
+
+function render() {
+    requestAnimationFrame(render);
+    const deltaTime = clock.getDelta();
+    const elapsedTime = clock.getElapsedTime();
+
+    updateTimeline(deltaTime);
+    updateArrows();
+
+    // 水面のアニメーション
+    const positions = riverGeo.attributes.position.array;
+    for (let i = 0; i < positions.length; i += 3) {
+        const x = positions[i];
+        const y = positions[i + 1];
+        positions[i + 2] = Math.sin(x * 0.02 + elapsedTime) * 2 + Math.cos(y * 0.02 + elapsedTime) * 2;
+    }
+    riverGeo.attributes.position.needsUpdate = true;
+
+    // 風パーティクル
+    const ePos = embers.geometry.attributes.position.array;
+    for(let i=0; i<emberCount; i++) {
+        ePos[i*3] += windVector.x * 2;
+        ePos[i*3+1] += Math.random() * 1;
+        ePos[i*3+2] += windVector.z * 2;
+        
+        if(ePos[i*3+1] > 200 || ePos[i*3] < -500 || ePos[i*3] > 500 || ePos[i*3+2] < -500 || ePos[i*3+2] > 500) {
+            ePos[i*3] = (Math.random() - 0.5) * 1000;
+            ePos[i*3+1] = 0;
+            ePos[i*3+2] = (Math.random() - 0.5) * 1000;
+        }
+    }
+    embers.geometry.attributes.position.needsUpdate = true;
+
+    // 炎パーティクル
+    const fPos = fires.geometry.attributes.position.array;
+    fireData.forEach((f, i) => {
+        if(f.active) {
+            f.life -= deltaTime * 0.5;
+            f.x += f.vx; f.y += f.vy; f.z += f.vz;
+            fPos[i*3] = f.x; fPos[i*3+1] = f.y; fPos[i*3+2] = f.z;
+            if(f.life <= 0) { f.active = false; fPos[i*3+1] = -100; }
+        }
+    });
+    fires.geometry.attributes.position.needsUpdate = true;
+
+    // カメラワーク（シネマティック）
+    if(isCinematic) {
+        if(phase === 1) {
+            camera.position.lerp(new THREE.Vector3(200, 150, 400), 0.01);
+            camera.lookAt(0, 0, -100);
+        } else if (phase === 2) {
+            camera.position.lerp(new THREE.Vector3(300, 100, 400), 0.01);
+            camera.lookAt(altarGlow.position);
+        } else if (phase === 3) {
+            camera.position.lerp(new THREE.Vector3(0, 50, fireShips[5].z + 150), 0.05);
+            camera.lookAt(0, 0, fireShips[5].z - 100);
+        } else if (phase === 4) {
+            const rotSpeed = elapsedTime * 0.1;
+            camera.position.set(Math.cos(rotSpeed)*300, 150, -200 + Math.sin(rotSpeed)*300);
+            camera.lookAt(0, 0, -250);
+        }
+    } else {
+        controls.update();
+    }
+
+    renderer.render(scene, camera);
+}
+
+// ==========================================
+// 6. UI制御とリサイズ処理
+// ==========================================
+document.getElementById('cam-auto').addEventListener('click', (e) => {
+    isCinematic = true;
+    e.target.classList.add('active');
+    document.getElementById('cam-manual').classList.remove('active');
+});
+document.getElementById('cam-manual').addEventListener('click', (e) => {
+    isCinematic = false;
+    e.target.classList.add('active');
+    document.getElementById('cam-auto').classList.remove('active');
+});
+document.getElementById('toggle-ui').addEventListener('click', () => {
+    const ui = document.getElementById('ui-layer');
+    ui.classList.toggle('hidden');
+});
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// 初期カメラ位置
+camera.position.set(0, 200, 600);
+controls.target.set(0, 0, 0);
+
+// アプリケーション開始
+render();
+
+</script>
+</body>
+</html>
